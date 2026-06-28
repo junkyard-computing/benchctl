@@ -28,6 +28,9 @@ rollback_reboots = 7   # reboots to burn before the slot's retry budget is exhau
 [experiment]
 # How benchctl talks to the experiment slot. felix mainline has no network -> "uart".
 transport = "uart"     # "uart" | "ssh"
+# If the uartfs agent isn't answering, `uartfs bootstrap` it and re-ping before
+# refusing (a booted experiment still needs the agent launched).
+auto_bootstrap = true
 
 [flash]
 # "uartfs"    — in-place delta-flash over UART from the running experiment slot (felix default)

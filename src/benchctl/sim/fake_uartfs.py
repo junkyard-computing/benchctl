@@ -26,7 +26,12 @@ class SimUartfs:
         rest = argv[argv.index(verb) + 1 :] if verb else []
 
         if verb == "ping":
-            return RunResult(0, "agent ready (v1)\n", "") if self._sim.experiment_up else _LINK_DOWN
+            return RunResult(0, "agent ready (v1)\n", "") if self._sim.agent_reachable else _LINK_DOWN
+
+        if verb == "bootstrap":
+            if self._sim.uartfs_bootstrap():
+                return RunResult(0, "", "agent bootstrapped and ready (v1)")
+            return RunResult(3, "", "uartfs: agent did not come up after bootstrap")
 
         if verb == "run":
             remote = self._sim.uartfs_run(" ".join(rest))
@@ -47,6 +52,6 @@ class SimUartfs:
             )
 
         if verb in ("pull", "push", "install-module"):
-            return RunResult(0, "", "ok") if self._sim.experiment_up else _LINK_DOWN
+            return RunResult(0, "", "ok") if self._sim.agent_reachable else _LINK_DOWN
 
-        return RunResult(0, "", "")  # bootstrap / quit
+        return RunResult(0, "", "")  # quit

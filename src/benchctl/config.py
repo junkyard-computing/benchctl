@@ -48,6 +48,9 @@ class ExperimentConfig:
     # How benchctl talks to the experiment slot. On felix mainline it has no
     # network, so it's reachable only over UART.
     transport: str = "uart"  # "uart" | "ssh"
+    # If the uartfs agent isn't answering, `uartfs bootstrap` it and re-ping
+    # before refusing (the agent must be running for the in-place loop).
+    auto_bootstrap: bool = True
 
 
 @dataclass

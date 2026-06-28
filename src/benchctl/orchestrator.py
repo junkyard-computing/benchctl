@@ -32,7 +32,7 @@ from benchctl.bootctl import Bootctl
 from benchctl.clock import Clock
 from benchctl.config import Config
 from benchctl.device import Device, RunResult
-from benchctl.errors import CommandError, Refusal, Unrecoverable, UartTimeout
+from benchctl.errors import CommandError, Refusal, UartfsError, UartTimeout, Unrecoverable
 from benchctl.ota import Ota
 from benchctl.power.base import Power
 from benchctl.uart import UartClient
@@ -402,8 +402,18 @@ class Orchestrator:
     # --- helpers ---------------------------------------------------------
 
     def _assert_experiment_up(self) -> None:
-        if not self.uartfs.ping():
-            raise Refusal("experiment slot is not up on UART (uartfs agent not responding)")
+        if self.uartfs.ping():
+            return
+        # The agent may simply not be launched yet — bootstrap it and re-ping.
+        # (A truly down/panicked experiment has no shell, so bootstrap fails too.)
+        if self.config.experiment.auto_bootstrap:
+            try:
+                self.uartfs.bootstrap()
+            except UartfsError:
+                pass
+            if self.uartfs.ping():
+                return
+        raise Refusal("experiment slot is not up on UART (uartfs agent not responding)")
 
     def _check_reboot_budget(self, estimated_reboots: int) -> None:
         budget = self.config.battery.reboot_budget

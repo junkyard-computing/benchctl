@@ -99,6 +99,37 @@ def test_iterate_uartfs_refuses_when_experiment_not_up():
         orch.iterate_uartfs(IMAGES)
 
 
+# --- agent lifecycle (auto-bootstrap) -------------------------------------
+
+def test_iterate_uartfs_auto_bootstraps_a_down_agent():
+    sim = SimDevice(experiment_boots="good", experiment_retries=None)
+    _on_experiment(sim)
+    sim.agent_running = False  # booted, but the uartfs agent isn't launched yet
+    orch = make_orchestrator(sim, power=None, config=_sim_config())
+    res = orch.iterate_uartfs(IMAGES, success_regex=r"Reached target", fail_regex=r"Kernel panic")
+    assert res.outcome == "iterated"
+    assert sim.agent_running is True  # bootstrap launched it
+
+
+def test_iterate_uartfs_refuses_down_agent_when_autobootstrap_off():
+    sim = SimDevice(experiment_boots="good")
+    _on_experiment(sim)
+    sim.agent_running = False
+    cfg = _sim_config()
+    cfg.experiment.auto_bootstrap = False
+    orch = make_orchestrator(sim, power=None, config=cfg)
+    with pytest.raises(Refusal):
+        orch.iterate_uartfs(IMAGES)
+
+
+def test_autobootstrap_cannot_revive_a_panicked_experiment():
+    sim = SimDevice(experiment_boots="bad")  # no shell -> bootstrap can't help
+    _on_experiment(sim)
+    orch = make_orchestrator(sim, power=None, config=_sim_config())
+    with pytest.raises(Refusal):
+        orch.iterate_uartfs(IMAGES)
+
+
 # --- reboot / battery budget ----------------------------------------------
 
 def test_iterate_refuses_when_reboot_budget_too_low():

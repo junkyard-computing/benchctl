@@ -76,6 +76,9 @@ class SimDevice:
         self.staged_dir: str | None = None
         self.pushes: list[tuple[str, str]] = []
         self.uartfs_flashes: list[tuple[str, str]] = []
+        # Whether the phone-side uartfs agent is launched. A booted experiment
+        # may still need `uartfs bootstrap` before ping/run/flash work.
+        self.agent_running = True
         # When set, a uartfs flash makes the *next* experiment boot good/bad
         # (models flashing a working vs panicking kernel in place).
         self.flash_outcome: str | None = None
@@ -91,9 +94,13 @@ class SimDevice:
 
     @property
     def experiment_up(self) -> bool:
-        # The experiment is reachable over uartfs only if it actually booted to a
-        # shell — a panicking ("bad") kernel has no userspace.
+        # The experiment booted to a shell — a panicking ("bad") kernel has none.
         return self.booted == self.experiment and self.experiment_boots != "bad"
+
+    @property
+    def agent_reachable(self) -> bool:
+        # uartfs needs both a shell AND the agent launched on it.
+        return self.experiment_up and self.agent_running
 
     # --- Device protocol -------------------------------------------------
 
@@ -178,10 +185,18 @@ class SimDevice:
 
     # --- uartfs transport (experiment slot, mainline) --------------------
 
-    def uartfs_run(self, cmd: str) -> RunResult | None:
-        """Reliable exec over UART. Works only while the experiment is up on a
-        shell; returns None when the transport is down."""
+    def uartfs_bootstrap(self) -> bool:
+        """Install + launch the phone-side agent over the bare console. Needs a
+        shell, so it can't revive a panicked experiment."""
         if not self.experiment_up:
+            return False
+        self.agent_running = True
+        return True
+
+    def uartfs_run(self, cmd: str) -> RunResult | None:
+        """Reliable exec over UART. Needs the agent reachable; returns None when
+        the transport is down."""
+        if not self.agent_reachable:
             return None
         if "reboot" in cmd.split():
             self._reboot()
@@ -190,8 +205,8 @@ class SimDevice:
 
     def uartfs_flash(self, image: str, partlabel: str) -> bool:
         """In-place delta-flash of the running experiment slot. Returns False
-        (transport down) when the experiment isn't up on a shell."""
-        if not self.experiment_up:
+        (transport down) when the agent isn't reachable."""
+        if not self.agent_reachable:
             return False
         self.uartfs_flashes.append((image, partlabel))
         if self.flash_outcome is not None:

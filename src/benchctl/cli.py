@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sim-experiment-retries", type=int, default=None, help="mainline reboot budget before rollback")
     parser.add_argument("--sim-on-experiment", action="store_true", help="start booted on the experiment slot (uartfs loop)")
     parser.add_argument("--sim-flash-bad", action="store_true", help="a uartfs flash makes the next boot panic")
+    parser.add_argument("--sim-agent-down", action="store_true", help="uartfs agent not launched (exercise auto-bootstrap)")
     parser.add_argument("--sim-mark-successful", action="store_true", help="update wrongly marks experiment successful")
     parser.add_argument("--sim-no-power-recovers", action="store_true", help="cold boot also fails to recover")
     parser.add_argument("--sim-power-unreachable", action="store_true")
@@ -165,6 +166,8 @@ def _build_sim(args):
     if args.sim_on_experiment:
         sim.active = sim.experiment
         sim._boot(sim.experiment)
+    if args.sim_agent_down:
+        sim.agent_running = False
 
     cfg = Config(ssh=SSHConfig(host="sim", user="root"))
     _apply_overrides(cfg, args)
