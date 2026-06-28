@@ -1,0 +1,26 @@
+[project]
+name = "benchctl"
+version = "0.1.0"
+description = "Host orchestrator for unattended mainline-kernel iteration on a Pixel (felix/gs201)"
+readme = "README.md"
+authors = [
+    { name = "Christopher L. Crutchfield", email = "ccrutchf@ucsd.edu" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+benchctl = "benchctl.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

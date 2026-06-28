@@ -1,0 +1,44 @@
+# benchctl configuration sample.
+# Precedence: defaults < this file < env (BENCHCTL_<SECTION>_<KEY>) < CLI flags.
+# Copy to benchctl.toml and pass with --config, or rely on env/flag overrides.
+
+[ssh]
+# The booted "home base": stock image, SSH-reachable over the USB dongle.
+host = "felix.bench.lan"
+user = "root"
+key = "/home/bench/.ssh/felix_ed25519"   # optional; omit to use the agent
+port = 22
+# Privileged on-device commands (pixel-ota, pixel-bootctl, reboot) need root.
+# When true (default) they're wrapped in `sudo -n` — required for the documented
+# `kalm` login (passwordless sudo). Set false only if `user` is root.
+sudo = true
+# Transport bounds so a half-up device can't hang the recover loop forever:
+connect_timeout = 10.0    # ssh/scp -o ConnectTimeout (seconds)
+command_timeout = 120.0   # max wall time per ssh command / scp push
+
+[slots]
+home_base = "a"        # the recovery anchor; the experiment uses the other slot
+
+[uart]
+# Local companion binary to uartd (it owns the serial port). Invoked per turn.
+# A string is shell-split; a list is used as-is.
+command = ["uart", "--socket", "/run/uartd.sock"]
+
+[power]
+# backend: "tasmota" | "shelly" | "uhubctl"
+backend = "tasmota"
+address = "http://10.0.0.42"
+
+[power.options]
+cycle_delay = 5         # seconds the relay stays off during a cycle
+timeout = 5.0           # HTTP request timeout (tasmota/shelly) — keep finite
+# channel = 0           # shelly only: relay index
+# location = "1-2"      # uhubctl only: hub location (uhubctl -l)
+# port = 3              # uhubctl only: hub port number
+
+[timeouts]
+boot = 120.0            # UART capture window for the experiment boot
+rollback_wait = 180.0   # how long to wait for auto-rollback before the power backstop
+power_cycle_wait = 180.0
+ssh_probe = 5.0
+poll_interval = 5.0     # between home-base reachability probes during recovery
