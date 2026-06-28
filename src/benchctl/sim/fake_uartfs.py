@@ -1,19 +1,19 @@
-"""Sim uartfs transport: a Runner that answers `uartfs` verbs from the model.
+"""Sim uartfs transport: a Runner that answers real `uartfs` verbs from the model.
 
-Mirrors the uartfs exit-code contract: 0 ok (remote result in payload), 2 when
-the transport is down (experiment slot not up on UART).
+Mirrors the uartd UF5–UF8 CLI: no --json; `run` returns the device command's raw
+stdout/stderr and exit code; exit 2 == link/daemon down (experiment not up); flash
+reports a human line on stderr. Global flags (--sudo/--socket/...) are ignored.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 
 from benchctl.device import RunResult
 from benchctl.sim.fake_device import SimDevice
 
-_VERBS = {"run", "flash", "pull", "push"}
-_CONN_DOWN = RunResult(2, "", "uartfs: experiment slot not reachable")
+_VERBS = {"ping", "run", "flash", "pull", "push", "install-module", "bootstrap", "quit"}
+_LINK_DOWN = RunResult(2, "", "uartfs: link error: agent not responding")
 
 
 class SimUartfs:
@@ -21,31 +21,32 @@ class SimUartfs:
         self._sim = sim
 
     def run(self, argv: Sequence[str]) -> RunResult:
-        argv = [a for a in argv if a != "--json"]
+        argv = list(argv)
         verb = next((a for a in argv if a in _VERBS), None)
         rest = argv[argv.index(verb) + 1 :] if verb else []
 
+        if verb == "ping":
+            return RunResult(0, "agent ready (v1)\n", "") if self._sim.experiment_up else _LINK_DOWN
+
         if verb == "run":
-            remote = self._sim.uartfs_run(rest[0] if rest else "")
-            if remote is None:
-                return _CONN_DOWN
-            return _ok({"stdout": remote.stdout, "stderr": remote.stderr, "rc": remote.returncode})
+            remote = self._sim.uartfs_run(" ".join(rest))
+            return remote if remote is not None else _LINK_DOWN
 
         if verb == "flash":
-            image, partlabel = rest[0], rest[1]
+            positionals = [a for a in rest if not a.startswith("--")]
+            image = positionals[0] if positionals else ""
+            partlabel = positionals[1] if len(positionals) > 1 else ""
+            target = f"/dev/disk/by-partlabel/{partlabel}"
             if "--dry-run" in rest:
-                return _ok({"ok": True, "dry_run": True})
+                return RunResult(0, "", f"[dry-run] would flash to {target}")
             if not self._sim.uartfs_flash(image, partlabel):
-                return _CONN_DOWN
-            return _ok({"ok": True, "sha256": "0" * 64, "bytes_sent": 4096})
+                return _LINK_DOWN
+            kind = "delta-flashed" if "--base" in rest else "flashed"
+            return RunResult(
+                0, "", f"{kind} 4096 bytes to {target} (sha256 {'0' * 64}) — read-back verified"
+            )
 
-        if verb in ("pull", "push"):
-            if self._sim.booted != self._sim.experiment:
-                return _CONN_DOWN
-            return _ok({"ok": True, "bytes": 0})
+        if verb in ("pull", "push", "install-module"):
+            return RunResult(0, "", "ok") if self._sim.experiment_up else _LINK_DOWN
 
-        return _CONN_DOWN
-
-
-def _ok(payload: dict) -> RunResult:
-    return RunResult(0, json.dumps(payload), "")
+        return RunResult(0, "", "")  # bootstrap / quit

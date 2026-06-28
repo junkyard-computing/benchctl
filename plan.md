@@ -200,8 +200,9 @@ After a real bring-up session ([jboot-mainline/prompts/benchctl-updates.md](../j
 the device model gained a second, now-default world. Same TDD discipline, same seams.
 
 - **uartfs transport + flash** — the experiment slot (mainline) has no network; it's reached over
-  UART. `UartfsClient` wraps the `uartfs` binary (`run`/`flash`/`pull`, mocked — uartfs is still a
-  stub in uartd UF5); `UartDevice` makes the experiment a first-class transport.
+  UART. `UartfsClient` wraps the real `uartfs` binary (uartd UF5–UF8: `ping`/`run`/`push`/`pull`/
+  `flash --base`/`bootstrap`, exit codes `0/1/2/3`, no `--json`); `UartDevice` makes the experiment
+  a first-class transport. Host-side base cache → subsequent flashes ship only a zstd delta.
 - **In-place iterate** (`flash.backend = "uartfs"`, default) — delta-flash the experiment's own
   boot partition and **stay on it**, never round-tripping the home base.
 - **Retry-exhaustion recovery** (`slots.rollback_via`, default) — reboot the never-committed
@@ -212,5 +213,5 @@ the device model gained a second, now-default world. Same TDD discipline, same s
 - **Sim grew** a mainline mode (uartfs up/flash, retry-exhaustion countdown, panicked-kernel =
   no shell, flash-changes-next-boot) so both worlds run hardware-free.
 
-Deferred until hardware/uartfs land: live `FastbootDevice` flashing and battery-voltage reads;
-pinning the real `uartfs --json` contract against UF5.
+uartfs (UF5–UF8) has landed; the wrapper is matched to its real CLI. Deferred until hardware:
+live `FastbootDevice` flashing and `fastboot getvar battery-voltage` reads (both need a cable swap).

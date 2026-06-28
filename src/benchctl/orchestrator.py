@@ -100,6 +100,9 @@ class Orchestrator:
         self.uartfs = uartfs
         self.power_cycle_count = 0
         self.reboots_used = 0
+        # Host-side cache of the last image flashed to each partition; it *is* the
+        # current on-device content, so the next flash ships only a zstd delta.
+        self._flash_base: dict[str, str] = {}
 
     # --- derived ---------------------------------------------------------
 
@@ -366,7 +369,9 @@ class Orchestrator:
 
         t0 = self.clock.now()
         for img in images:
-            self.uartfs.flash(img, self._partlabel_for(img))
+            part = self._partlabel_for(img)
+            self.uartfs.flash(img, part, base=self._flash_base.get(part))
+            self._flash_base[part] = img  # next iteration delta-flashes against this
         timings["flash"] = self.clock.now() - t0
 
         t1 = self.clock.now()
@@ -397,9 +402,8 @@ class Orchestrator:
     # --- helpers ---------------------------------------------------------
 
     def _assert_experiment_up(self) -> None:
-        res = self.experiment_dev.run(["true"])
-        if res.returncode != 0:
-            raise Refusal("experiment slot is not up on UART (uartfs transport down)")
+        if not self.uartfs.ping():
+            raise Refusal("experiment slot is not up on UART (uartfs agent not responding)")
 
     def _check_reboot_budget(self, estimated_reboots: int) -> None:
         budget = self.config.battery.reboot_budget

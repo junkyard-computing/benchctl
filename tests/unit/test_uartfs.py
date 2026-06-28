@@ -1,15 +1,9 @@
-"""R2: uartfs CLI wrapper — the delta-flash + reliable-exec transport over UART.
+"""uartfs CLI wrapper — matched to the real uartd UF5–UF8 contract.
 
-uartfs runs locally on the bench host and rides uartd's socket to the experiment
-slot. Exit codes mirror uart: 0 ok, 1 op-failure (e.g. hash mismatch), 2 daemon/
-connection, 3 uartfs/remote error. `run` returns the *remote* command's result;
-`flash` delta-flashes a partition and verifies.
-
-NOTE: the real uartfs technician CLI is still a stub (uartd UF5). This pins the
-contract our mock assumes — keep it in sync when UF5 lands.
+No --json: `run` returns the device command's raw stdout/stderr and exit code;
+exit 2 = link/daemon down, 3 = transfer/verify. Global --sudo prefixes the
+privileged device-side actions (push/pull/flash); `run` does not take it.
 """
-
-import json
 
 import pytest
 
@@ -18,59 +12,86 @@ from benchctl.uartfs import UartfsClient
 from tests.support import RecordingDevice
 
 
-def _client(dev, command=("uartfs",)):
-    return UartfsClient(list(command), dev)
+def _client(dev, command=("uartfs",), sudo=True):
+    return UartfsClient(list(command), dev, sudo=sudo)
 
 
-def test_run_returns_remote_result():
-    payload = json.dumps({"stdout": "ok\n", "stderr": "", "rc": 0})
-    dev = RecordingDevice().queue(0, payload)
+def test_ping_true_false():
+    assert _client(RecordingDevice().queue(0, "agent ready (v1)")).ping() is True
+    assert _client(RecordingDevice().queue(2, "", "no agent")).ping() is False
+
+
+def test_run_returns_raw_remote_result():
+    dev = RecordingDevice().queue(0, "5.10.0\n", "")
     res = _client(dev).run("uname -r")
-    assert dev.last_call == ["uartfs", "run", "uname -r", "--json"]
+    assert dev.last_call == ["uartfs", "run", "uname -r"]  # no --json, no --sudo
     assert res.returncode == 0
-    assert res.stdout == "ok\n"
+    assert res.stdout == "5.10.0\n"
 
 
-def test_run_propagates_remote_nonzero_rc():
-    payload = json.dumps({"stdout": "", "stderr": "no such file", "rc": 1})
-    dev = RecordingDevice().queue(0, payload)  # transport ok, remote rc=1
+def test_run_propagates_remote_nonzero():
+    dev = RecordingDevice().queue(1, "", "no such file")
     res = _client(dev).run("cat /missing")
     assert res.returncode == 1
     assert "no such file" in res.stderr
 
 
-def test_run_transport_failure_raises():
-    dev = RecordingDevice().queue(2, "", "daemon not running")
+def test_run_link_error_raises():
+    dev = RecordingDevice().queue(2, "", "agent not responding")
     with pytest.raises(UartfsError):
         _client(dev).run("true")
 
 
 def test_custom_invocation_prefixed():
-    dev = RecordingDevice().queue(0, json.dumps({"stdout": "", "stderr": "", "rc": 0}))
+    dev = RecordingDevice().queue(0, "")
     _client(dev, command=("uartfs", "--socket", "/run/uartd.sock")).run("true")
     assert dev.last_call[:3] == ["uartfs", "--socket", "/run/uartd.sock"]
 
 
-def test_flash_builds_argv_and_ok():
-    dev = RecordingDevice().queue(0, json.dumps({"ok": True, "sha256": "abc", "bytes_sent": 1234}))
+def test_flash_builds_argv_with_sudo_and_parses_report():
+    dev = RecordingDevice().queue(
+        0, "", "flashed 4096 bytes to /dev/disk/by-partlabel/boot_a (sha256 " + "a" * 64 + ") — read-back verified"
+    )
     res = _client(dev).flash("boot.img", "boot_a")
-    assert dev.last_call == ["uartfs", "flash", "boot.img", "boot_a", "--json"]
+    assert dev.last_call == ["uartfs", "--sudo", "flash", "boot.img", "boot_a"]
     assert res.ok is True
+    assert res.sha256 == "a" * 64
+    assert res.bytes_sent == 4096
 
 
-def test_flash_dry_run_flag():
-    dev = RecordingDevice().queue(0, json.dumps({"ok": True}))
-    _client(dev).flash("boot.img", "boot_a", dry_run=True)
-    assert "--dry-run" in dev.last_call
+def test_flash_delta_with_base():
+    dev = RecordingDevice().queue(0, "", "delta-flashed 512 bytes to /dev/disk/by-partlabel/vendor_boot_a (sha256 " + "b" * 64 + ")")
+    _client(dev).flash("vendor_boot.img", "vendor_boot_a", base="/cache/prev.img")
+    assert dev.last_call == [
+        "uartfs", "--sudo", "flash", "vendor_boot.img", "vendor_boot_a", "--base", "/cache/prev.img"
+    ]
 
 
-def test_flash_hash_mismatch_raises():
-    dev = RecordingDevice().queue(1, json.dumps({"ok": False, "error": "sha256 mismatch"}), "sha256 mismatch")
+def test_flash_dry_run_and_raw_target_flags():
+    dev = RecordingDevice().queue(0, "", "[dry-run] would flash")
+    _client(dev).flash("boot.img", "/dev/block/sda", dry_run=True, raw_target=True)
+    assert dev.last_call == [
+        "uartfs", "--sudo", "flash", "boot.img", "/dev/block/sda", "--dry-run", "--raw-target"
+    ]
+
+
+def test_flash_no_sudo_when_disabled():
+    dev = RecordingDevice().queue(0, "", "flashed 1 bytes to x (sha256 " + "0" * 64 + ")")
+    _client(dev, sudo=False).flash("boot.img", "boot_a")
+    assert dev.last_call == ["uartfs", "flash", "boot.img", "boot_a"]
+
+
+def test_flash_verify_failure_raises():
+    dev = RecordingDevice().queue(3, "", "sha256 mismatch after write")
     with pytest.raises(UartfsError):
         _client(dev).flash("boot.img", "boot_a")
 
 
-def test_pull_builds_argv():
-    dev = RecordingDevice().queue(0, json.dumps({"ok": True, "bytes": 42}))
-    _client(dev).pull("vendor_boot_a", "/tmp/snap.img")
-    assert dev.last_call == ["uartfs", "pull", "vendor_boot_a", "/tmp/snap.img", "--json"]
+def test_pull_and_push_argv():
+    dev = RecordingDevice().queue(0, "", "pulled 42 bytes")
+    _client(dev).pull("vendor_boot_a:0:4096", "/tmp/snap.img")
+    assert dev.last_call == ["uartfs", "--sudo", "pull", "vendor_boot_a:0:4096", "/tmp/snap.img"]
+
+    dev2 = RecordingDevice().queue(0, "", "pushed 10 bytes")
+    _client(dev2).push("/tmp/x", "/data/x")
+    assert dev2.last_call == ["uartfs", "--sudo", "push", "/tmp/x", "/data/x"]

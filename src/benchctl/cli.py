@@ -125,7 +125,7 @@ def _build_real(args):
     )
     runner = LocalRunner()
     uart = UartClient(cfg.uart.command, runner)
-    uartfs = UartfsClient(cfg.uart.uartfs_command, runner)
+    uartfs = UartfsClient(cfg.uart.uartfs_command, runner, sudo=cfg.ssh.sudo)
     return Orchestrator(
         device=device,
         bootctl=Bootctl(device),

@@ -1,34 +1,41 @@
 """Wrapper around the local ``uartfs`` binary — delta-flash + reliable exec over UART.
 
-uartfs rides the serial console owned by uartd, framing/ACK'ing/sha256-verifying a
-delta-aware transport to the experiment slot (which has no network). benchctl shells
-out to the configured invocation and parses ``--json``.
+uartfs (uartd workspace, UF5–UF8) rides the serial console owned by uartd, framing/
+ACK'ing/sha256-verifying a delta-aware transport to the experiment slot's phone-side
+agent. benchctl shells out to the configured invocation.
 
-The operations benchctl needs:
-- ``run <cmd>``            reliable remote exec → {stdout, stderr, rc}; also the
-                           experiment-slot ``Device.run`` primitive.
-- ``flash <img> <part>``   delta-flash a partition vs its live contents, verify,
-                           dd, read-back-verify → {ok, sha256, ...}.
-- ``pull <remote> <out>``  snapshot an on-device file/partition for diff-base.
+Real CLI contract (matched against uartd `crates/uartfs/src/main.rs`):
+- Global flags (before the subcommand): ``--socket``, ``--chunk``, ``--device-dir``,
+  ``--sudo`` (prefixes device-side privileged actions: push/pull/flash/install-module).
+- ``ping``                         handshake with the agent.
+- ``run <cmd...>``                 exec on device; stdout→stdout, stderr→stderr, exit =
+                                   the *remote* command's code.
+- ``push <local> <remote>``        verified file copy.
+- ``pull <spec> <local|->``        read a file or ``partlabel:off:len`` slice.
+- ``flash <img> <partlabel> [--base <local>] [--dry-run] [--raw-target]``
+                                   delta-flash a partition (``--base`` ships a zstd delta),
+                                   dd, read-back-verify.
+- ``install-module <local.ko> [--insmod]``, ``bootstrap``, ``quit``.
+- Exit codes: 0 ok · 1 device command non-zero (run) · 2 link/daemon · 3 transfer/verify.
 
-Process exit mirrors uart: 0 ok · 1 op-failure · 2 daemon/conn · 3 uartfs/remote.
-On success ``run`` carries the *remote* command's rc inside the payload.
-
-The real uartfs CLI is not finalized (uartd UF5); this is the assumed contract.
+There is **no ``--json``**; ``run`` output is the device command's raw stdout/stderr,
+which is exactly what a ``Runner`` already captures.
 """
 
 from __future__ import annotations
 
-import json
+import re
 from dataclasses import dataclass
 
 from benchctl.device import RunResult, Runner
 from benchctl.errors import UartfsError
 
 EXIT_OK = 0
-EXIT_OP_FAILURE = 1
-EXIT_CONN = 2
-EXIT_REMOTE = 3
+EXIT_LINK = 2       # daemon/link error (not a remote result)
+EXIT_TRANSFER = 3   # transfer / verify failure
+
+_SHA_RE = re.compile(r"sha256\s+([0-9a-f]{64})")
+_BYTES_RE = re.compile(r"(?:flashed|delta-flashed|pushed)\s+(\d+)\s+bytes")
 
 
 @dataclass(frozen=True)
@@ -39,46 +46,74 @@ class FlashResult:
 
 
 class UartfsClient:
-    def __init__(self, command: list[str], runner: Runner) -> None:
+    def __init__(self, command: list[str], runner: Runner, *, sudo: bool = True) -> None:
         self._command = list(command)
         self._runner = runner
+        self._sudo = sudo
 
-    def _run(self, *args: str) -> RunResult:
-        return self._runner.run([*self._command, *args, "--json"])
+    # privileged device-side actions take the global --sudo; `run` does not
+    # (the caller embeds sudo in the command string itself).
+    def _privileged(self, *args: str) -> RunResult:
+        prefix = [*self._command, *(["--sudo"] if self._sudo else [])]
+        return self._runner.run([*prefix, *args])
 
-    def _payload(self, res: RunResult, op: str) -> dict:
-        # Any non-zero uartfs exit is a transport/op failure, not a remote result.
-        if res.returncode != EXIT_OK:
-            raise UartfsError(f"uartfs {op} failed (exit {res.returncode}): {res.stderr.strip()}")
-        try:
-            return json.loads(res.stdout) if res.stdout.strip() else {}
-        except json.JSONDecodeError as exc:
-            raise UartfsError(f"uartfs {op}: unparseable output: {res.stdout!r}") from exc
+    def ping(self) -> bool:
+        return self._runner.run([*self._command, "ping"]).returncode == EXIT_OK
 
     def run(self, cmd: str) -> RunResult:
-        """Run a shell command on the experiment slot; return its remote result."""
-        data = self._payload(self._run("run", cmd), "run")
-        return RunResult(
-            returncode=int(data.get("rc", 0)),
-            stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""),
-        )
+        """Run a shell command on the experiment slot; return its remote result.
+        A link/daemon error (exit 2) is a transport failure, not a remote code."""
+        res = self._runner.run([*self._command, "run", cmd])
+        if res.returncode == EXIT_LINK:
+            raise UartfsError(f"uartfs run: link/daemon error: {res.stderr.strip()}")
+        return res  # returncode is the device command's exit code
 
-    def flash(self, image: str, partlabel: str, *, dry_run: bool = False) -> FlashResult:
+    def flash(
+        self,
+        image: str,
+        partlabel: str,
+        *,
+        base: str | None = None,
+        dry_run: bool = False,
+        raw_target: bool = False,
+    ) -> FlashResult:
         args = ["flash", image, partlabel]
+        if base is not None:
+            args += ["--base", base]
         if dry_run:
             args.append("--dry-run")
-        data = self._payload(self._run(*args), "flash")
-        if not data.get("ok", False):
-            raise UartfsError(f"uartfs flash {partlabel}: {data.get('error', 'not ok')}")
+        if raw_target:
+            args.append("--raw-target")
+        res = self._privileged(*args)
+        if res.returncode != EXIT_OK:
+            raise UartfsError(f"uartfs flash {partlabel}: {res.stderr.strip()}")
         return FlashResult(
             ok=True,
-            sha256=data.get("sha256"),
-            bytes_sent=data.get("bytes_sent"),
+            sha256=_search(_SHA_RE, res.stderr),
+            bytes_sent=_search_int(_BYTES_RE, res.stderr),
         )
 
-    def pull(self, remote: str, local: str) -> dict:
-        return self._payload(self._run("pull", remote, local), "pull")
+    def pull(self, spec: str, local: str) -> None:
+        res = self._privileged("pull", spec, local)
+        if res.returncode != EXIT_OK:
+            raise UartfsError(f"uartfs pull {spec}: {res.stderr.strip()}")
 
-    def push(self, local: str, remote: str) -> dict:
-        return self._payload(self._run("push", local, remote), "push")
+    def push(self, local: str, remote: str) -> None:
+        res = self._privileged("push", local, remote)
+        if res.returncode != EXIT_OK:
+            raise UartfsError(f"uartfs push {remote}: {res.stderr.strip()}")
+
+    def bootstrap(self) -> None:
+        res = self._runner.run([*self._command, "bootstrap"])
+        if res.returncode != EXIT_OK:
+            raise UartfsError(f"uartfs bootstrap failed: {res.stderr.strip()}")
+
+
+def _search(rx: re.Pattern, text: str) -> str | None:
+    m = rx.search(text or "")
+    return m.group(1) if m else None
+
+
+def _search_int(rx: re.Pattern, text: str) -> int | None:
+    m = rx.search(text or "")
+    return int(m.group(1)) if m else None

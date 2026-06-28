@@ -124,12 +124,12 @@ real waiting. Built test-first; see [`plan.md`](plan.md).
 
 ## Status / caveats
 
-Developed and tested entirely against the simulation. To validate on real felix before trusting it
-unattended:
+Developed and tested entirely against the simulation. The `uart` and `uartfs` wrappers are matched
+to the real uartd CLIs (uartfs UF5–UF8: `ping`/`run`/`push`/`pull`/`flash --base`/`bootstrap`,
+exit codes `0/1/2/3`, no `--json`). To validate on real felix before trusting it unattended:
 
 1. The **rollback-vs-fastboot** behaviour when the experiment slot's retry budget exhausts.
-2. The **`uart` / `uartfs` `--json` contracts** assumed in [`uart.py`](src/benchctl/uart.py) /
-   [`uartfs.py`](src/benchctl/uartfs.py) against the real binaries (uartfs is still a stub in uartd —
-   pin its CLI when UF5 lands).
+2. Agent lifecycle on hardware — `uartfs bootstrap` the phone-side agent, then `ping`, before an
+   iterate loop (benchctl refuses if `ping` fails).
 3. **Battery awareness is reboot-count only** until a `fastboot getvar battery-voltage` reader is
    added (needs a cable swap).
