@@ -52,22 +52,39 @@ class FakeClock:
         self.t += seconds
 
 
+def power_config(**slots):
+    """Config with a power backend enabled and rollback_via=power (legacy A/B)."""
+    from benchctl.config import Config, PowerConfig, SlotConfig, SSHConfig
+
+    return Config(
+        ssh=SSHConfig(host="sim", user="root"),
+        slots=SlotConfig(rollback_via="power", **slots),
+        power=PowerConfig(backend="sim", address="sim"),
+    )
+
+
 def make_orchestrator(sim, *, power=None, clock=None, config=None):
-    """Wire an Orchestrator over a SimDevice with the real wrappers in the loop."""
+    """Wire an Orchestrator over a SimDevice with the real wrappers + transports."""
     from benchctl.bootctl import Bootctl
     from benchctl.config import Config, SSHConfig
+    from benchctl.device import UartDevice
     from benchctl.orchestrator import Orchestrator
     from benchctl.ota import Ota
-    from benchctl.sim import SimPower, SimUart
+    from benchctl.sim import SimPower, SimUart, SimUartfs
     from benchctl.uart import UartClient
+    from benchctl.uartfs import UartfsClient
 
     config = config or Config(ssh=SSHConfig(host="sim", user="root"))
+    uart = UartClient(["uart"], SimUart(sim))
+    uartfs = UartfsClient(["uartfs"], SimUartfs(sim))
     return Orchestrator(
         device=sim,
         bootctl=Bootctl(sim),
         ota=Ota(sim),
-        uart=UartClient(["uart"], SimUart(sim)),
-        power=power or SimPower(sim),
+        uart=uart,
+        power=power if power is not None else SimPower(sim),
         clock=clock or FakeClock(),
         config=config,
+        experiment=UartDevice(uartfs, uart),
+        uartfs=uartfs,
     )

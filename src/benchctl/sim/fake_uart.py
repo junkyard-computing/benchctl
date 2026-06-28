@@ -42,11 +42,14 @@ class SimUart:
         return _ok({"text": self._sim.console})
 
     def _wait(self, regex: str) -> RunResult:
-        match = re.search(regex, self._sim.console)
+        # uartd's `wait` observes a rolling window from when the call starts, not
+        # the whole forensic log — so it matches only output since the last read,
+        # never a stale marker from a previous boot.
+        window = self._sim.console[self._read_offset :]
+        match = re.search(regex, window)
         if match:
-            return _ok({"matched": True, "text": self._sim.console})
-        # timeout: non-zero exit, as the real binary does
-        return RunResult(1, json.dumps({"matched": False, "text": self._sim.console}), "")
+            return _ok({"matched": True, "text": window})
+        return RunResult(1, json.dumps({"matched": False, "text": window}), "")
 
 
 def _ok(payload: dict) -> RunResult:

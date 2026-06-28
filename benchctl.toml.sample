@@ -18,15 +18,39 @@ command_timeout = 120.0   # max wall time per ssh command / scp push
 
 [slots]
 home_base = "a"        # the recovery anchor; the experiment uses the other slot
+# How recover() returns to the home base:
+#   "retry-exhaustion" — reboot the experiment until the bootloader rolls back (felix mainline; no power)
+#   "power"            — passive rollback wait + one power-cycle backstop (needs a power backend)
+#   "fastboot"         — operator UART<->fastboot cable swap (not autonomous)
+rollback_via = "retry-exhaustion"
+rollback_reboots = 7   # reboots to burn before the slot's retry budget is exhausted
+
+[experiment]
+# How benchctl talks to the experiment slot. felix mainline has no network -> "uart".
+transport = "uart"     # "uart" | "ssh"
+
+[flash]
+# "uartfs"    — in-place delta-flash over UART from the running experiment slot (felix default)
+# "pixel-ota" — flash the inactive slot from the home base (A/B dance)
+# "fastboot"  — interactive cable-swap path
+backend = "uartfs"
 
 [uart]
-# Local companion binary to uartd (it owns the serial port). Invoked per turn.
+# Local companion binaries to uartd (it owns the serial port). Invoked per turn.
 # A string is shell-split; a list is used as-is.
 command = ["uart", "--socket", "/run/uartd.sock"]
+uartfs_command = ["uartfs", "--socket", "/run/uartd.sock"]
+
+[battery]
+# felix is battery-only and can't charge while rigged for UART. benchctl counts
+# reboots and refuses an iteration that can't safely complete.
+floor_voltage = 3.5    # single-cell Li-ion floor (read via fastboot when available)
+reboot_budget = 0      # max reboots per iteration; 0 == unenforced
 
 [power]
-# backend: "tasmota" | "shelly" | "uhubctl"
-backend = "tasmota"
+# OPTIONAL. felix has no power relay -> set backend = "none" (or omit the section).
+# backend: "none" | "tasmota" | "shelly" | "uhubctl"
+backend = "none"
 address = "http://10.0.0.42"
 
 [power.options]

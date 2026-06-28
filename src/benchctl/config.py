@@ -36,6 +36,33 @@ class SSHConfig:
 @dataclass
 class SlotConfig:
     home_base: str = "a"
+    # How recover() returns to the home base. On felix mainline the experiment
+    # slot can't switch slots or self-commit, so the primitive is exhausting the
+    # boot-retry counter; "power"/"fastboot" are opt-in alternatives.
+    rollback_via: str = "retry-exhaustion"  # "retry-exhaustion" | "power" | "fastboot"
+    rollback_reboots: int = 7
+
+
+@dataclass
+class ExperimentConfig:
+    # How benchctl talks to the experiment slot. On felix mainline it has no
+    # network, so it's reachable only over UART.
+    transport: str = "uart"  # "uart" | "ssh"
+
+
+@dataclass
+class FlashConfig:
+    # "uartfs": in-place delta-flash from the running experiment slot (preferred).
+    # "pixel-ota": flash the inactive slot from the home base (A/B dance).
+    # "fastboot": interactive cable-swap path.
+    backend: str = "uartfs"  # "uartfs" | "pixel-ota" | "fastboot"
+
+
+@dataclass
+class BatteryConfig:
+    floor_voltage: float = 3.5
+    # Max reboots benchctl will commit to in one iteration; 0 == unenforced.
+    reboot_budget: int = 0
 
 
 @dataclass
@@ -44,10 +71,15 @@ class PowerConfig:
     address: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def enabled(self) -> bool:
+        return bool(self.backend) and self.backend != "none"
+
 
 @dataclass
 class UartConfig:
     command: list[str] = field(default_factory=lambda: ["uart"])
+    uartfs_command: list[str] = field(default_factory=lambda: ["uartfs"])
 
 
 @dataclass
@@ -63,6 +95,9 @@ class Timeouts:
 class Config:
     ssh: SSHConfig
     slots: SlotConfig = field(default_factory=SlotConfig)
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    flash: FlashConfig = field(default_factory=FlashConfig)
+    battery: BatteryConfig = field(default_factory=BatteryConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
     uart: UartConfig = field(default_factory=UartConfig)
     timeouts: Timeouts = field(default_factory=Timeouts)
@@ -71,6 +106,9 @@ class Config:
 _SECTIONS = {
     "ssh": SSHConfig,
     "slots": SlotConfig,
+    "experiment": ExperimentConfig,
+    "flash": FlashConfig,
+    "battery": BatteryConfig,
     "power": PowerConfig,
     "uart": UartConfig,
     "timeouts": Timeouts,
@@ -115,7 +153,7 @@ def _build_section(cls: type, raw: dict[str, Any]):
         if name not in type_by_name:
             continue  # ignore unknown keys
         target = type_by_name[name]
-        if name == "command":
+        if target == "list[str]":
             value = shlex.split(value) if isinstance(value, str) else list(value)
         elif target == "float":
             value = float(value)
@@ -153,6 +191,9 @@ def load_config(
     return Config(
         ssh=_build_section(SSHConfig, ssh_raw),
         slots=_build_section(SlotConfig, merged.get("slots", {})),
+        experiment=_build_section(ExperimentConfig, merged.get("experiment", {})),
+        flash=_build_section(FlashConfig, merged.get("flash", {})),
+        battery=_build_section(BatteryConfig, merged.get("battery", {})),
         power=_build_section(PowerConfig, merged.get("power", {})),
         uart=_build_section(UartConfig, merged.get("uart", {})),
         timeouts=_build_section(Timeouts, merged.get("timeouts", {})),

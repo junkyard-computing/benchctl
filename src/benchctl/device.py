@@ -131,3 +131,39 @@ class SSHDevice:
             if isinstance(err, bytes):
                 err = err.decode("utf-8", "replace")
             raise CommandError(scp, getattr(exc, "returncode", None) or 124, err) from exc
+
+
+class UartDevice:
+    """The experiment slot as a first-class transport.
+
+    On felix mainline the experiment has no network — it's reachable only over
+    UART. Commands run through ``uartfs run`` (reliable, framed exec); boot
+    classification reads the console via ``uart``. When the transport is down
+    (the experiment isn't up), ``run`` returns a non-zero result so the
+    orchestrator's reachability checks compose the same way they do for SSH.
+    """
+
+    def __init__(self, uartfs, uart) -> None:
+        self._uartfs = uartfs
+        self._uart = uart
+
+    def run(self, argv: Sequence[str], *, sudo: bool = False) -> RunResult:
+        from benchctl.errors import UartfsError
+
+        cmd = " ".join(shlex.quote(a) for a in argv)
+        if sudo:
+            cmd = f"sudo -n {cmd}"
+        try:
+            return self._uartfs.run(cmd)
+        except UartfsError as exc:
+            return RunResult(255, "", str(exc))
+
+    def push(self, local: str, remote: str) -> None:
+        self._uartfs.push(local, remote)
+
+    # Console access for boot classification (no SSH on the experiment slot).
+    def wait(self, regex: str, *, timeout: float):
+        return self._uart.wait(regex, timeout=timeout)
+
+    def read_console(self):
+        return self._uart.read()

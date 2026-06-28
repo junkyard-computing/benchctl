@@ -4,7 +4,7 @@ import pytest
 
 from benchctl.errors import Refusal, Unrecoverable
 from benchctl.sim import SimDevice, SimPower
-from tests.support import FakeClock, make_orchestrator
+from tests.support import FakeClock, make_orchestrator, power_config
 
 IMAGES = ["boot.img", "vendor_boot.img", "dtbo.img"]
 
@@ -39,7 +39,7 @@ def test_refuses_when_home_base_not_successful():
 
 def test_refuses_when_power_unreachable():
     sim = SimDevice()
-    orch = make_orchestrator(sim, power=SimPower(sim, reachable=False))
+    orch = make_orchestrator(sim, power=SimPower(sim, reachable=False), config=power_config())
     with pytest.raises(Refusal):
         orch.verify_home_base()
 
@@ -87,7 +87,7 @@ def test_boot_experiment_classifies_success():
 
 def test_boot_experiment_refuses_when_power_unreachable():
     sim = SimDevice()
-    orch = make_orchestrator(sim, power=SimPower(sim, reachable=False))
+    orch = make_orchestrator(sim, power=SimPower(sim, reachable=False), config=power_config())
     with pytest.raises(Refusal):
         orch.boot_experiment(success_regex="x", fail_regex="y", timeout=5)
 
@@ -103,7 +103,7 @@ def test_boot_experiment_refuses_when_home_base_unhealthy():
 
 def test_recover_rolled_back():
     sim = SimDevice(experiment_boots="bad", rollback_after=2)
-    orch = make_orchestrator(sim)
+    orch = make_orchestrator(sim, config=power_config())
     orch.stage(IMAGES)
     orch.boot_experiment(success_regex=r"never", fail_regex=r"Kernel panic", timeout=5)
     outcome = orch.recover()
@@ -114,7 +114,7 @@ def test_recover_rolled_back():
 
 def test_recover_wedged_does_exactly_one_power_cycle():
     sim = SimDevice(experiment_boots="bad", rollback_after=None)
-    orch = make_orchestrator(sim)
+    orch = make_orchestrator(sim, config=power_config())
     orch.stage(IMAGES)
     orch.boot_experiment(success_regex=r"never", fail_regex=r"Kernel panic", timeout=5)
     outcome = orch.recover()
@@ -124,7 +124,7 @@ def test_recover_wedged_does_exactly_one_power_cycle():
 
 def test_recover_unrecoverable_raises():
     sim = SimDevice(experiment_boots="bad", rollback_after=None, power_cycle_recovers=False)
-    orch = make_orchestrator(sim)
+    orch = make_orchestrator(sim, config=power_config())
     orch.stage(IMAGES)
     orch.boot_experiment(success_regex=r"never", fail_regex=r"Kernel panic", timeout=5)
     with pytest.raises(Unrecoverable):
@@ -135,7 +135,7 @@ def test_recover_unrecoverable_raises():
 
 def test_iterate_fail_then_rollback_end_to_end():
     sim = SimDevice(experiment_boots="bad", rollback_after=2)
-    orch = make_orchestrator(sim)
+    orch = make_orchestrator(sim, config=power_config())
     result = orch.iterate(IMAGES, success_regex=r"Reached target", fail_regex=r"Kernel panic")
     assert result.outcome == "rolled-back"
     assert result.boot.classification == "failed"
@@ -157,7 +157,7 @@ def test_recover_honors_timeout_bounds(monkeypatch):
     # rollback never happens; recover must terminate (not hang) and power-cycle.
     sim = SimDevice(experiment_boots="bad", rollback_after=None)
     clock = FakeClock()
-    orch = make_orchestrator(sim, clock=clock)
+    orch = make_orchestrator(sim, clock=clock, config=power_config())
     orch.stage(IMAGES)
     orch.boot_experiment(success_regex=r"never", fail_regex=r"Kernel panic", timeout=5)
     orch.recover(rollback_timeout=30, power_cycle_timeout=30, poll_interval=5)

@@ -33,5 +33,9 @@ class UartTimeout(BenchctlError):
     """A uart wait/expect did not match within the timeout."""
 
 
+class UartfsError(BenchctlError):
+    """A uartfs transport/op failed (connection, hash mismatch, remote error)."""
+
+
 class Unrecoverable(BenchctlError):
     """Home base did not return after rollback and the power-cycle backstop."""

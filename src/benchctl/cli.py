@@ -43,11 +43,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"benchctl {__version__}")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--config", help="path to benchctl.toml")
+    parser.add_argument(
+        "--flash", choices=["uartfs", "pixel-ota", "fastboot"], help="flash backend override"
+    )
+    parser.add_argument(
+        "--rollback-via", choices=["retry-exhaustion", "power", "fastboot"],
+        help="recovery strategy override",
+    )
+    parser.add_argument("--reboot-budget", type=int, help="max reboots per iteration (0 = unenforced)")
 
     # Simulation mode (hardware-free). The sim-* knobs reproduce the scenarios.
     parser.add_argument("--sim", action="store_true", help="run against the in-process simulation")
     parser.add_argument("--sim-boots", choices=["good", "bad"], default="bad")
-    parser.add_argument("--sim-rollback-after", default="2", help="N probes, or 'none' to never roll back")
+    parser.add_argument("--sim-rollback-after", default="2", help="N SSH probes, or 'none' to never roll back")
+    parser.add_argument("--sim-experiment-retries", type=int, default=None, help="mainline reboot budget before rollback")
+    parser.add_argument("--sim-on-experiment", action="store_true", help="start booted on the experiment slot (uartfs loop)")
+    parser.add_argument("--sim-flash-bad", action="store_true", help="a uartfs flash makes the next boot panic")
     parser.add_argument("--sim-mark-successful", action="store_true", help="update wrongly marks experiment successful")
     parser.add_argument("--sim-no-power-recovers", action="store_true", help="cold boot also fails to recover")
     parser.add_argument("--sim-power-unreachable", action="store_true")
@@ -81,17 +92,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 # --- orchestrator wiring --------------------------------------------------
 
+def _apply_overrides(cfg, args) -> None:
+    if args.flash:
+        cfg.flash.backend = args.flash
+    if args.rollback_via:
+        cfg.slots.rollback_via = args.rollback_via
+    if args.reboot_budget is not None:
+        cfg.battery.reboot_budget = args.reboot_budget
+
+
 def _build_real(args):
     from benchctl.bootctl import Bootctl
     from benchctl.clock import RealClock
     from benchctl.config import load_config
-    from benchctl.device import LocalRunner, SSHDevice
+    from benchctl.device import LocalRunner, SSHDevice, UartDevice
     from benchctl.orchestrator import Orchestrator
     from benchctl.ota import Ota
     from benchctl.power import create_power
     from benchctl.uart import UartClient
+    from benchctl.uartfs import UartfsClient
 
     cfg = load_config(path=args.config, env=dict(os.environ))
+    _apply_overrides(cfg, args)
     device = SSHDevice(
         cfg.ssh.host,
         cfg.ssh.user,
@@ -101,25 +123,32 @@ def _build_real(args):
         connect_timeout=cfg.ssh.connect_timeout,
         command_timeout=cfg.ssh.command_timeout,
     )
+    runner = LocalRunner()
+    uart = UartClient(cfg.uart.command, runner)
+    uartfs = UartfsClient(cfg.uart.uartfs_command, runner)
     return Orchestrator(
         device=device,
         bootctl=Bootctl(device),
         ota=Ota(device),
-        uart=UartClient(cfg.uart.command, LocalRunner()),
-        power=create_power(cfg.power),
+        uart=uart,
+        power=create_power(cfg.power) if cfg.power.enabled else None,
         clock=RealClock(),
         config=cfg,
+        experiment=UartDevice(uartfs, uart),
+        uartfs=uartfs,
     )
 
 
 def _build_sim(args):
     from benchctl.bootctl import Bootctl
     from benchctl.clock import InstantClock
-    from benchctl.config import Config, SSHConfig
+    from benchctl.config import Config, PowerConfig, SSHConfig
+    from benchctl.device import UartDevice
     from benchctl.orchestrator import Orchestrator
     from benchctl.ota import Ota
-    from benchctl.sim import SimDevice, SimPower, SimUart
+    from benchctl.sim import SimDevice, SimPower, SimUart, SimUartfs
     from benchctl.uart import UartClient
+    from benchctl.uartfs import UartfsClient
 
     rollback_after = None if str(args.sim_rollback_after).lower() == "none" else int(args.sim_rollback_after)
     sim = SimDevice(
@@ -127,19 +156,33 @@ def _build_sim(args):
         rollback_after=rollback_after,
         update_marks_successful=args.sim_mark_successful,
         power_cycle_recovers=not args.sim_no_power_recovers,
+        experiment_retries=args.sim_experiment_retries,
     )
     if args.sim_home_unhealthy:
         sim.slots["a"].successful = False
+    if args.sim_flash_bad:
+        sim.flash_outcome = "bad"
+    if args.sim_on_experiment:
+        sim.active = sim.experiment
+        sim._boot(sim.experiment)
 
     cfg = Config(ssh=SSHConfig(host="sim", user="root"))
+    _apply_overrides(cfg, args)
+    if cfg.slots.rollback_via == "power":
+        cfg.power = PowerConfig(backend="sim", address="sim")  # enable the power backstop
+
+    uart = UartClient(["uart"], SimUart(sim))
+    uartfs = UartfsClient(["uartfs"], SimUartfs(sim))
     return Orchestrator(
         device=sim,
         bootctl=Bootctl(sim),
         ota=Ota(sim),
-        uart=UartClient(["uart"], SimUart(sim)),
-        power=SimPower(sim, reachable=not args.sim_power_unreachable),
+        uart=uart,
+        power=SimPower(sim, reachable=not args.sim_power_unreachable) if cfg.power.enabled else None,
         clock=InstantClock(),
         config=cfg,
+        experiment=UartDevice(uartfs, uart),
+        uartfs=uartfs,
     )
 
 
@@ -193,25 +236,40 @@ def _cmd_boot_experiment(orch, args) -> int:
 def _cmd_iterate(orch, args) -> int:
     kw = _classify_kwargs(args)
     timeout = kw.pop("timeout", None)
-    res = orch.iterate(args.images, boot_timeout=timeout, **kw)
+    if orch.config.flash.backend == "uartfs":
+        res = orch.iterate_uartfs(args.images, boot_timeout=timeout, **kw)
+    else:
+        res = orch.iterate(args.images, boot_timeout=timeout, **kw)
     payload = {
         "outcome": res.outcome,
+        "flash": res.flash,
         "boot": {"classification": res.boot.classification, "console": res.boot.console},
         "power_cycles": res.power_cycles,
+        "reboots": res.reboots,
         "timings": res.timings,
     }
-    human = f"outcome: {res.outcome} (boot={res.boot.classification}, power_cycles={res.power_cycles})"
+    human = (
+        f"outcome: {res.outcome} (flash={res.flash}, boot={res.boot.classification}, "
+        f"reboots={res.reboots}, power_cycles={res.power_cycles})"
+    )
     _emit(args, payload, human)
     return EXIT_UNRECOVERABLE if res.outcome == "unrecoverable" else EXIT_OK
 
 
 def _cmd_recover(orch, args) -> int:
     outcome = orch.recover()
-    _emit(args, {"outcome": outcome, "power_cycles": orch.power_cycle_count}, f"outcome: {outcome}")
+    _emit(
+        args,
+        {"outcome": outcome, "power_cycles": orch.power_cycle_count, "reboots": orch.reboots_used},
+        f"outcome: {outcome}",
+    )
     return EXIT_OK
 
 
 def _cmd_power(orch, args) -> int:
+    if orch.power is None:
+        _error(args, "refusal", "no power backend configured (power.backend = none)")
+        return EXIT_REFUSAL
     getattr(orch.power, args.action)()
     _emit(args, {"power": args.action, "ok": True}, f"power {args.action}: ok")
     return EXIT_OK

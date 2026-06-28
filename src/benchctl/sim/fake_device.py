@@ -53,10 +53,15 @@ class SimDevice:
         rollback_after: int | None = 2,
         update_marks_successful: bool = False,
         power_cycle_recovers: bool = True,
+        experiment_retries: int | None = None,
     ) -> None:
         self.home_base = home_base
         self.experiment = "b" if home_base == "a" else "a"
         self.power_cycle_recovers = power_cycle_recovers
+        # Mainline retry-exhaustion budget: each experiment reboot that isn't
+        # marked successful burns one; at 0 the next reboot rolls back to home
+        # base. None == not modeled (the AOSP/probe-driven path).
+        self.experiment_retries = experiment_retries
         self.slots = {
             home_base: _Slot(successful=True, retries=7),
             self.experiment: _Slot(successful=False, retries=0),
@@ -70,6 +75,11 @@ class SimDevice:
         self.console = ""
         self.staged_dir: str | None = None
         self.pushes: list[tuple[str, str]] = []
+        self.uartfs_flashes: list[tuple[str, str]] = []
+        # When set, a uartfs flash makes the *next* experiment boot good/bad
+        # (models flashing a working vs panicking kernel in place).
+        self.flash_outcome: str | None = None
+        self._pending_experiment_boots: str | None = None
         self.power_cycles = 0
         self._unreachable_probes = 0
 
@@ -78,6 +88,12 @@ class SimDevice:
     @property
     def reachable(self) -> bool:
         return self.booted == self.home_base
+
+    @property
+    def experiment_up(self) -> bool:
+        # The experiment is reachable over uartfs only if it actually booted to a
+        # shell — a panicking ("bad") kernel has no userspace.
+        return self.booted == self.experiment and self.experiment_boots != "bad"
 
     # --- Device protocol -------------------------------------------------
 
@@ -150,12 +166,44 @@ class SimDevice:
     # --- boot model ------------------------------------------------------
 
     def _reboot(self) -> RunResult:
+        # Mainline retry-exhaustion: an experiment slot that never self-commits
+        # burns a retry each reboot; once exhausted the bootloader rolls back.
+        if self.experiment_retries is not None and self.active == self.experiment:
+            if self.experiment_retries <= 0:
+                self._rollback()
+                return RunResult(0, "", "")
+            self.experiment_retries -= 1
         self._boot(self.active)
         return RunResult(0, "", "")  # reboot command returns before link drops
+
+    # --- uartfs transport (experiment slot, mainline) --------------------
+
+    def uartfs_run(self, cmd: str) -> RunResult | None:
+        """Reliable exec over UART. Works only while the experiment is up on a
+        shell; returns None when the transport is down."""
+        if not self.experiment_up:
+            return None
+        if "reboot" in cmd.split():
+            self._reboot()
+            return RunResult(0, "", "")
+        return RunResult(0, f"[sim] {cmd}\n", "")
+
+    def uartfs_flash(self, image: str, partlabel: str) -> bool:
+        """In-place delta-flash of the running experiment slot. Returns False
+        (transport down) when the experiment isn't up on a shell."""
+        if not self.experiment_up:
+            return False
+        self.uartfs_flashes.append((image, partlabel))
+        if self.flash_outcome is not None:
+            self._pending_experiment_boots = self.flash_outcome  # takes effect next boot
+        return True
 
     def _boot(self, slot: str) -> None:
         self.booted = slot
         self._unreachable_probes = 0
+        if slot == self.experiment and self._pending_experiment_boots is not None:
+            self.experiment_boots = self._pending_experiment_boots  # flashed kernel
+            self._pending_experiment_boots = None
         if slot == self.home_base:
             self.console += HOME_BASE_BOOT
         else:

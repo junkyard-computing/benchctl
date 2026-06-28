@@ -1,7 +1,11 @@
-"""M7: acceptance — the spec's five simulation-mode scenarios, driven through the
-real CLI (argv in, exit code + JSON out). No hardware, no injection.
+"""Acceptance — both worlds driven through the real CLI in sim mode (no hardware).
 
-Exit codes: 0 ok, 3 refusal, 4 unrecoverable, 5 boot-failed.
+  uartfs world (felix mainline default): in-place delta-flash, stay on the
+  experiment slot, retry-exhaustion recovery, no power backend.
+  pixel-ota world (legacy A/B): flash inactive slot from home base, passive
+  rollback + power-cycle backstop.
+
+Exit codes: 0 ok · 3 refusal · 4 unrecoverable · 5 boot-failed.
 """
 
 import json
@@ -13,14 +17,73 @@ IMAGES = ["boot.img", "vendor_boot.img", "dtbo.img"]
 
 def run(argv, capsys):
     rc = main(argv)
-    out = capsys.readouterr().out
-    return rc, out
+    return rc, capsys.readouterr().out
 
 
-# 1. fail-then-rollback -> rolled-back
-def test_fail_then_rollback(capsys):
+# ============================ uartfs world ================================
+
+def test_uartfs_iterate_success_stays_on_experiment(capsys):
     rc, out = run(
-        ["--json", "--sim", "--sim-boots", "bad", "--sim-rollback-after", "2",
+        ["--json", "--sim", "--sim-on-experiment", "--sim-boots", "good",
+         "iterate", *IMAGES],
+        capsys,
+    )
+    data = json.loads(out)
+    assert rc == 0
+    assert data["flash"] == "uartfs"
+    assert data["outcome"] == "iterated"
+
+
+def test_uartfs_bad_flash_recovers_via_retry_exhaustion(capsys):
+    rc, out = run(
+        ["--json", "--sim", "--sim-on-experiment", "--sim-boots", "good",
+         "--sim-flash-bad", "--sim-rollback-after", "2", "iterate", *IMAGES],
+        capsys,
+    )
+    data = json.loads(out)
+    assert rc == 0
+    assert data["boot"]["classification"] == "failed"
+    assert data["outcome"] == "rolled-back"
+    assert data["power_cycles"] == 0  # no power backend involved
+
+
+def test_uartfs_iterate_refuses_when_experiment_not_up(capsys):
+    # default (booted on home base) -> the experiment isn't up on UART
+    rc, out = run(["--sim", "iterate", *IMAGES], capsys)
+    assert rc == 3
+    assert "experiment" in out.lower()
+
+
+def test_retry_exhaustion_recover(capsys):
+    rc, out = run(
+        ["--json", "--sim", "--sim-on-experiment", "--sim-boots", "good",
+         "--sim-experiment-retries", "3", "recover"],
+        capsys,
+    )
+    data = json.loads(out)
+    assert rc == 0
+    assert data["outcome"] == "rolled-back"
+    assert data["power_cycles"] == 0
+
+
+def test_reboot_budget_refusal(capsys):
+    rc, out = run(
+        ["--sim", "--sim-on-experiment", "--sim-boots", "good", "--reboot-budget", "2",
+         "iterate", *IMAGES],
+        capsys,
+    )
+    assert rc == 3
+    assert "budget" in out.lower()
+
+
+# ============================ pixel-ota world =============================
+
+_OTA = ["--flash", "pixel-ota", "--rollback-via", "power"]
+
+
+def test_pixel_ota_fail_then_rollback(capsys):
+    rc, out = run(
+        ["--json", "--sim", *_OTA, "--sim-boots", "bad", "--sim-rollback-after", "2",
          "iterate", *IMAGES],
         capsys,
     )
@@ -31,10 +94,9 @@ def test_fail_then_rollback(capsys):
     assert data["power_cycles"] == 0
 
 
-# 2. wedge -> exactly one power-cycle -> wedged-recovered
-def test_wedge_recovered_with_one_power_cycle(capsys):
+def test_pixel_ota_wedge_one_power_cycle(capsys):
     rc, out = run(
-        ["--json", "--sim", "--sim-boots", "bad", "--sim-rollback-after", "none",
+        ["--json", "--sim", *_OTA, "--sim-boots", "bad", "--sim-rollback-after", "none",
          "iterate", *IMAGES],
         capsys,
     )
@@ -44,29 +106,20 @@ def test_wedge_recovered_with_one_power_cycle(capsys):
     assert data["power_cycles"] == 1
 
 
-# 3. refuse boot-experiment if home base unhealthy / power unreachable
-def test_refuses_boot_experiment_when_home_unhealthy(capsys):
-    rc, out = run(["--sim", "--sim-home-unhealthy", "boot-experiment"], capsys)
-    assert rc == 3
-    assert "refus" in out.lower() or "not marked successful" in out.lower()
-
-
-def test_refuses_boot_experiment_when_power_unreachable(capsys):
-    rc, out = run(["--sim", "--sim-power-unreachable", "boot-experiment"], capsys)
+def test_pixel_ota_refuses_boot_experiment_when_power_unreachable(capsys):
+    rc, out = run([*_OTA, "--sim", "--sim-power-unreachable", "boot-experiment"], capsys)
     assert rc == 3
 
 
-# 4. abort if post-stage experiment slot reads successful
-def test_aborts_when_experiment_marked_successful(capsys):
-    rc, out = run(["--sim", "--sim-mark-successful", "iterate", *IMAGES], capsys)
+def test_pixel_ota_aborts_when_experiment_marked_successful(capsys):
+    rc, out = run([*_OTA, "--sim", "--sim-mark-successful", "iterate", *IMAGES], capsys)
     assert rc == 3
     assert "successful" in out.lower()
 
 
-# 5. unrecoverable path surfaces distinctly (never-rollback + cold boot fails)
-def test_unrecoverable_exit_code(capsys):
+def test_pixel_ota_unrecoverable(capsys):
     rc, out = run(
-        ["--json", "--sim", "--sim-rollback-after", "none", "--sim-no-power-recovers",
+        ["--json", "--sim", *_OTA, "--sim-rollback-after", "none", "--sim-no-power-recovers",
          "iterate", *IMAGES],
         capsys,
     )
@@ -75,20 +128,8 @@ def test_unrecoverable_exit_code(capsys):
     assert data["outcome"] == "unrecoverable"
 
 
-# good boot also returns rolled-back (never confirmed -> still rolls back)
-def test_good_experiment_still_rolls_back(capsys):
-    rc, out = run(
-        ["--json", "--sim", "--sim-boots", "good", "--sim-rollback-after", "2",
-         "iterate", *IMAGES],
-        capsys,
-    )
-    data = json.loads(out)
-    assert rc == 0
-    assert data["outcome"] == "rolled-back"
-    assert data["boot"]["classification"] == "success"
+# ============================ general ====================================
 
-
-# status command renders JSON
 def test_status_json(capsys):
     rc, out = run(["--json", "--sim", "status"], capsys)
     data = json.loads(out)
@@ -97,7 +138,12 @@ def test_status_json(capsys):
     assert data["home_base_healthy"] is True
 
 
-# power subcommand drives the backend
-def test_power_cycle_subcommand(capsys):
+def test_power_subcommand_refuses_without_backend(capsys):
+    # default felix config has no power backend
     rc, out = run(["--sim", "power", "cycle"], capsys)
+    assert rc == 3
+
+
+def test_power_subcommand_with_backend(capsys):
+    rc, out = run(["--sim", "--rollback-via", "power", "power", "cycle"], capsys)
     assert rc == 0

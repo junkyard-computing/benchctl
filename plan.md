@@ -191,3 +191,26 @@ Test deps (pytest, an HTTP mock) in the dev shell only.
 - **`flash-ssh.sh` reuse** — lift its pixel-ota/pixel-bootctl invocations + preflight verbatim
   into `ota.py`/`bootctl.py`; drop the destructive rootfs reflash; add rollback-wait + UART +
   power backstop. Read it before writing M2.
+
+---
+
+## Update — felix mainline rework (R1–R10)
+
+After a real bring-up session ([jboot-mainline/prompts/benchctl-updates.md](../jboot-mainline/prompts/benchctl-updates.md)),
+the device model gained a second, now-default world. Same TDD discipline, same seams.
+
+- **uartfs transport + flash** — the experiment slot (mainline) has no network; it's reached over
+  UART. `UartfsClient` wraps the `uartfs` binary (`run`/`flash`/`pull`, mocked — uartfs is still a
+  stub in uartd UF5); `UartDevice` makes the experiment a first-class transport.
+- **In-place iterate** (`flash.backend = "uartfs"`, default) — delta-flash the experiment's own
+  boot partition and **stay on it**, never round-tripping the home base.
+- **Retry-exhaustion recovery** (`slots.rollback_via`, default) — reboot the never-committed
+  experiment until the bootloader rolls back; **no power relay required**. `power` is optional
+  (`backend = "none"`); the legacy passive-rollback + power-cycle path is `rollback_via = "power"`.
+- **Reboot/battery budget** — refuse an iteration that can't safely complete; live
+  `fastboot getvar battery-voltage` deferred (needs a cable swap).
+- **Sim grew** a mainline mode (uartfs up/flash, retry-exhaustion countdown, panicked-kernel =
+  no shell, flash-changes-next-boot) so both worlds run hardware-free.
+
+Deferred until hardware/uartfs land: live `FastbootDevice` flashing and battery-voltage reads;
+pinning the real `uartfs --json` contract against UF5.

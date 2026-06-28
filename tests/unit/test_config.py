@@ -120,3 +120,73 @@ def test_unknown_env_keys_are_ignored():
         env={"PATH": "/usr/bin", "BENCHCTL_NOTASECTION": "x"},
     )
     assert cfg.ssh.host == "felix"
+
+
+# --- R1: felix bring-up additions -----------------------------------------
+
+def test_new_section_defaults():
+    cfg = load_config(overrides={"ssh": {"host": "felix", "user": "root"}})
+    # experiment transport / flash backend default to the felix reality
+    assert cfg.experiment.transport == "uart"
+    assert cfg.flash.backend == "uartfs"
+    assert cfg.slots.rollback_via == "retry-exhaustion"
+    assert cfg.slots.rollback_reboots == 7
+    assert cfg.uart.uartfs_command == ["uartfs"]
+    # power is optional and off by default; battery budget present
+    assert cfg.power.enabled is False
+    assert cfg.battery.reboot_budget == 0  # 0 == unenforced
+    assert cfg.battery.floor_voltage > 0
+
+
+def test_power_backend_none_string_is_disabled():
+    cfg = load_config(overrides={"ssh": {"host": "x", "user": "root"}, "power": {"backend": "none"}})
+    assert cfg.power.enabled is False
+
+
+def test_power_backend_set_is_enabled():
+    cfg = load_config(
+        overrides={"ssh": {"host": "x", "user": "root"}, "power": {"backend": "tasmota", "address": "http://h"}}
+    )
+    assert cfg.power.enabled is True
+
+
+def test_uartfs_command_string_is_split(tmp_path):
+    path = _write(tmp_path, '[ssh]\nhost = "x"\nuser = "root"\n[uart]\nuartfs_command = "uartfs --socket /s"\n')
+    cfg = load_config(path=path)
+    assert cfg.uart.uartfs_command == ["uartfs", "--socket", "/s"]
+
+
+def test_slots_and_battery_from_file(tmp_path):
+    path = _write(
+        tmp_path,
+        """
+        [ssh]
+        host = "felix"
+        user = "root"
+        [experiment]
+        transport = "uart"
+        [flash]
+        backend = "pixel-ota"
+        [slots]
+        rollback_via = "power"
+        rollback_reboots = 9
+        [battery]
+        floor_voltage = 3.6
+        reboot_budget = 20
+        """,
+    )
+    cfg = load_config(path=path)
+    assert cfg.flash.backend == "pixel-ota"
+    assert cfg.slots.rollback_via == "power"
+    assert cfg.slots.rollback_reboots == 9
+    assert cfg.battery.floor_voltage == 3.6
+    assert cfg.battery.reboot_budget == 20
+
+
+def test_env_override_new_sections():
+    cfg = load_config(
+        overrides={"ssh": {"host": "x", "user": "root"}},
+        env={"BENCHCTL_FLASH_BACKEND": "fastboot", "BENCHCTL_BATTERY_REBOOT_BUDGET": "12"},
+    )
+    assert cfg.flash.backend == "fastboot"
+    assert cfg.battery.reboot_budget == 12
